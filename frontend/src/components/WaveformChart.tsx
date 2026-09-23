@@ -2,15 +2,9 @@ import React, { useEffect, useState, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { useEEGStore } from '../store/eeg';
 import { EEGData, BandPower, BrainState, CorrelationData } from '../types';
+import { ALL_CHANNELS, CHANNEL_NAMES, validateBandPower } from '../utils/bands';
 import axios from 'axios';
 
-const CHANNEL_NAMES: Record<string, string> = {
-  Fp1: '左前额', Fp2: '右前额', F3: '左额', F4: '右额',
-  C3: '左中央', C4: '右中央', P3: '左顶', P4: '右顶',
-  O1: '左枕', O2: '右枕'
-};
-
-const ALL_CHANNELS = ['Fp1', 'Fp2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4', 'O1', 'O2'];
 const SAMPLE_RATE = 256;
 
 const generateMockEEG = (durationSec: number = 3.0): EEGData => {
@@ -108,38 +102,70 @@ const computeCorrelation = (targetChannel: string, eegData: EEGData): Correlatio
 
 export const WaveformChart: React.FC = () => {
   const {
-    eegData, selectedChannel, setEEGData, setBandPower, setBrainState, setCorrelationData,
-    isRecording, addRecordingFrame, playbackMode,
+    eegData, selectedChannel, compareChannel,
   } = useEEGStore();
   const [loading, setLoading] = useState(false);
   const intervalRef = useRef<number | null>(null);
+  // 每次拉取递增序号，跨通道切换后丢弃过期响应，避免旧通道结果覆盖新通道
+  const fetchSeqRef = useRef(0);
 
   const fetchEEG = async () => {
     const state = useEEGStore.getState();
     if (state.playbackMode) return;
+    const seq = ++fetchSeqRef.current;
+    const channel = state.selectedChannel;
+    const compare = state.compareChannel;
     setLoading(true);
-    let eeg: EEGData, bands: BandPower, brainState: BrainState, correlation: CorrelationData;
+    let eeg: EEGData;
+    let bands: BandPower | null;
+    let compareBands: BandPower | null = null;
+    let brainState: BrainState;
+    let correlation: CorrelationData;
+    let simulated = false;
     try {
-      const { data } = await axios.get(`/api/eeg/sample/${state.selectedChannel}?duration=3`);
+      const params: Record<string, string | number> = { duration: 3 };
+      if (compare) params.compare = compare;
+      const { data } = await axios.get(`/api/eeg/sample/${channel}`, { params });
       eeg = data.eeg;
-      bands = data.bands;
+      bands = validateBandPower(data.bands);
+      compareBands = compare ? validateBandPower(data.compareBands) : null;
       brainState = data.brainState;
       correlation = data.correlation;
     } catch {
+      // 网络失败：生成属于当前请求通道的新数据，不读取自 store，绝不沿用上一通道结果
       eeg = generateMockEEG(3);
       bands = computeBandPower();
+      if (compare) compareBands = computeBandPower();
       brainState = computeBrainState(bands);
-      correlation = computeCorrelation(state.selectedChannel, eeg);
+      correlation = computeCorrelation(channel, eeg);
+      simulated = true;
+    }
+    if (seq !== fetchSeqRef.current || useEEGStore.getState().selectedChannel !== channel) {
+      setLoading(false);
+      return;
     }
     state.setEEGData(eeg);
-    state.setBandPower(bands);
     state.setBrainState(brainState);
     state.setCorrelationData(correlation);
-    if (state.isRecording) {
-      state.addRecordingFrame(eeg, bands, brainState, correlation);
+    if (!bands) {
+      // 五频段缺失/非法：丢弃该帧频段结果，不补零、不沿用历史值
+      state.setBandError('频段数据缺失或无效，请等待下一帧刷新');
+    } else {
+      // 与波形同节拍：同一时间戳写入主通道与对比通道的频段趋势
+      state.recordBandPower(channel, bands, Date.now(), compare, compareBands);
+      if (state.isRecording) {
+        state.addRecordingFrame(eeg, bands, brainState, correlation);
+      }
+    }
+    if (simulated) {
+      // 离线演示数据提示（不影响波形与脑状态阅读）
+      useEEGStore.setState({ bandWarning: compare ? '接口不可用，对比通道为模拟数据' : '接口不可用，当前为模拟数据' });
     }
     setLoading(false);
   };
+
+  const playbackMode = useEEGStore((s) => s.playbackMode);
+  const isRecording = useEEGStore((s) => s.isRecording);
 
   useEffect(() => {
     if (playbackMode) {
@@ -149,12 +175,14 @@ export const WaveformChart: React.FC = () => {
       }
       return;
     }
+    fetchSeqRef.current += 1; // 使进行中的旧请求失效
     fetchEEG();
     intervalRef.current = window.setInterval(fetchEEG, 3000);
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [selectedChannel, playbackMode]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedChannel, compareChannel, playbackMode]);
 
   const chartData = eegData?.data[selectedChannel]?.map((v: number, i: number) => ({
     t: eegData.time[i]?.toFixed(3), value: v.toFixed(4)
@@ -168,6 +196,9 @@ export const WaveformChart: React.FC = () => {
         <span style={{ fontSize: '20px' }}>📈</span>
         <span>{selectedChannel}</span>
         <span style={{ fontSize: '13px', color: '#666', fontWeight: 400 }}>{channelName} · 波形图</span>
+        {compareChannel && (
+          <span style={{ fontSize: '12px', color: '#6a1b9a', fontWeight: 500 }}>对比 {compareChannel}</span>
+        )}
         {isRecording && (
           <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', color: '#d32f2f', fontWeight: 500 }}>
             <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#d32f2f', animation: 'pulse 1s infinite' }} />
