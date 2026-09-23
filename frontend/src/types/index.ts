@@ -1,5 +1,15 @@
 export interface EEGData { channels: string[]; sample_rate: number; data: Record<string, number[]>; time: number[]; duration: number; }
+export type BandName = 'delta' | 'theta' | 'alpha' | 'beta' | 'gamma';
 export interface BandPower { delta: number; theta: number; alpha: number; beta: number; gamma: number; }
+export type BandViewMode = 'instant' | 'trend';
+export type BandTrendWindow = 15 | 30 | 60;
+export interface BandTrendPoint {
+  t: number;
+  channel: string;
+  bands: BandPower | null;
+  compareChannel: string | null;
+  compareBands: BandPower | null;
+}
 export interface BrainState {
   focus: number;
   relaxation: number;
@@ -23,7 +33,7 @@ export interface CorrelationData {
 export interface RecordingFrame {
   relativeTime: number;
   eeg: EEGData;
-  bands: BandPower;
+  bands: BandPower | null;
   brainState: BrainState;
   correlation: CorrelationData;
 }

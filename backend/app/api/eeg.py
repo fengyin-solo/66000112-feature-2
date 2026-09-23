@@ -41,15 +41,23 @@ async def list_channels():
     return {'channels': CHANNELS}
 
 @router.get("/sample/{channel}")
-async def full_sample(channel: str, duration: float = 3.0):
+async def full_sample(channel: str, duration: float = 3.0, compare: str | None = None):
     data = generate_mock_eeg(duration)
     if channel not in data['data']:
         return {'error': 'Channel not found'}
     channel_data = data['data'][channel]
+    # 对比通道与当前通道使用同一批波形数据计算，保证频段趋势与波形刷新帧一致
+    compare_bands = None
+    if compare:
+        compare_data = data['data'].get(compare)
+        if compare_data is not None:
+            compare_bands = compute_band_power(compare_data, SAMPLE_RATE)
     return {
         'channel': channel,
+        'compareChannel': compare if compare_bands is not None else None,
         'eeg': data,
         'bands': compute_band_power(channel_data, SAMPLE_RATE),
+        'compareBands': compare_bands,
         'brainState': compute_brain_state(channel_data, SAMPLE_RATE),
         'correlation': compute_correlation(channel, data['data'], SAMPLE_RATE)
     }

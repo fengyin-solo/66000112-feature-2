@@ -1,5 +1,10 @@
 import { create } from 'zustand';
-import { EEGData, BandPower, BrainState, CorrelationData, Recording, RecordingFrame, PlaybackState } from '../types';
+import { EEGData, BandPower, BrainState, CorrelationData, Recording, RecordingFrame, PlaybackState, BandViewMode, BandTrendWindow, BandTrendPoint } from '../types';
+import {
+  loadBandViewMode, loadBandTrendWindow, loadBandCompareChannel,
+  persistBandViewMode, persistBandTrendWindow, persistBandCompareChannel,
+  isValidBandPower, MAX_TREND_POINTS,
+} from '../utils/bands';
 
 const STORAGE_KEY = 'eeg_recordings';
 
@@ -32,15 +37,26 @@ interface EEGState {
   playbackMode: boolean;
   activeRecording: Recording | null;
   playbackState: PlaybackState;
+  bandViewMode: BandViewMode;
+  bandTrendWindow: BandTrendWindow;
+  bandCompareChannel: string | null;
+  bandTrend: BandTrendPoint[];
+  bandError: string | null;
   setEEGData: (d: EEGData | null) => void;
   setChannel: (c: string) => void;
   setBandPower: (b: BandPower | null) => void;
+  setBandViewMode: (m: BandViewMode) => void;
+  setBandTrendWindow: (w: BandTrendWindow) => void;
+  setBandCompareChannel: (c: string | null) => void;
+  setBandError: (msg: string | null) => void;
+  pushBandTrendPoint: (point: BandTrendPoint) => void;
+  clearBandTrend: () => void;
   setStreaming: (v: boolean) => void;
   setBrainState: (s: BrainState | null) => void;
   setCorrelationData: (c: CorrelationData | null) => void;
   startRecording: () => void;
   stopRecording: (name: string) => void;
-  addRecordingFrame: (eeg: EEGData, bands: BandPower, brainState: BrainState, correlation: CorrelationData) => void;
+  addRecordingFrame: (eeg: EEGData, bands: BandPower | null, brainState: BrainState, correlation: CorrelationData) => void;
   deleteRecording: (id: string) => void;
   enterPlaybackMode: (recording: Recording) => void;
   exitPlaybackMode: () => void;
@@ -67,9 +83,48 @@ export const useEEGStore = create<EEGState>((set, get) => ({
     currentTime: 0,
     currentFrame: null,
   },
+  bandViewMode: loadBandViewMode(),
+  bandTrendWindow: loadBandTrendWindow(),
+  bandCompareChannel: loadBandCompareChannel(),
+  bandTrend: [],
+  bandError: null,
   setEEGData: (d) => set({ eegData: d }),
-  setChannel: (c) => set({ selectedChannel: c }),
+  // 切换通道立即清空频段结果与趋势，杜绝沿用上一通道的数据；时间窗口/对比通道等选择保留
+  setChannel: (c) => set((state) => {
+    if (c === state.selectedChannel) return {};
+    if (state.playbackMode && state.activeRecording) {
+      const match = state.activeRecording.channel === c;
+      return {
+        selectedChannel: c,
+        bandTrend: [],
+        bandPower: match && isValidBandPower(state.playbackState.currentFrame?.bands)
+          ? state.playbackState.currentFrame!.bands
+          : null,
+        bandError: match ? null : `该录制仅包含 ${state.activeRecording.channel} 通道的频段数据`,
+      };
+    }
+    return { selectedChannel: c, bandPower: null, bandTrend: [], bandError: null };
+  }),
   setBandPower: (b) => set({ bandPower: b }),
+  setBandViewMode: (m) => {
+    persistBandViewMode(m);
+    set({ bandViewMode: m });
+  },
+  setBandTrendWindow: (w) => {
+    persistBandTrendWindow(w);
+    set({ bandTrendWindow: w });
+  },
+  setBandCompareChannel: (c) => {
+    persistBandCompareChannel(c);
+    // 对比通道变化时清掉旧对比结果（bands 置 null 强制下一帧刷新），趋势另以 compareChannel 标记隔离
+    set((state) => ({ bandCompareChannel: c, bandPower: null, bandError: null }));
+  },
+  setBandError: (msg) => set({ bandError: msg }),
+  pushBandTrendPoint: (point) => set((state) => {
+    const trend = [...state.bandTrend, point];
+    return { bandTrend: trend.length > MAX_TREND_POINTS ? trend.slice(-MAX_TREND_POINTS) : trend };
+  }),
+  clearBandTrend: () => set({ bandTrend: [], bandError: null, bandPower: null }),
   setStreaming: (v) => set({ isStreaming: v }),
   setBrainState: (s) => set({ brainState: s }),
   setCorrelationData: (c) => set({ correlationData: c }),
@@ -128,6 +183,11 @@ export const useEEGStore = create<EEGState>((set, get) => ({
   },
   enterPlaybackMode: (recording) => {
     if (recording.frames.length === 0) return;
+    const { selectedChannel } = get();
+    const channelMatch = recording.channel === selectedChannel;
+    const firstBands = channelMatch && isValidBandPower(recording.frames[0].bands)
+      ? recording.frames[0].bands
+      : null;
     set({
       playbackMode: true,
       activeRecording: recording,
@@ -137,12 +197,20 @@ export const useEEGStore = create<EEGState>((set, get) => ({
         currentFrame: recording.frames[0],
       },
       eegData: recording.frames[0].eeg,
-      bandPower: recording.frames[0].bands,
+      // 回放下只展示录制通道自身的频段；通道不匹配或数据缺失时置空，不复用进入前的结果
+      bandPower: firstBands,
+      bandTrend: [],
+      bandError: firstBands
+        ? null
+        : channelMatch
+          ? '该录制缺少频段数据'
+          : `该录制仅包含 ${recording.channel} 通道的频段数据`,
       brainState: recording.frames[0].brainState,
       correlationData: recording.frames[0].correlation,
     });
   },
   exitPlaybackMode: () => {
+    // 退出回放后等待实时帧重新填充，避免回放数据残留；时间窗口/视图/对比通道选择保持
     set({
       playbackMode: false,
       activeRecording: null,
@@ -151,6 +219,9 @@ export const useEEGStore = create<EEGState>((set, get) => ({
         currentTime: 0,
         currentFrame: null,
       },
+      bandPower: null,
+      bandTrend: [],
+      bandError: null,
     });
   },
   setPlaybackTime: (time) => {
@@ -166,6 +237,9 @@ export const useEEGStore = create<EEGState>((set, get) => ({
       }
     }
     const frame = frames[frameIndex];
+    const { activeRecording: rec, selectedChannel } = get();
+    const channelMatch = rec!.channel === selectedChannel;
+    const bands = channelMatch && isValidBandPower(frame.bands) ? frame.bands : null;
     set({
       playbackState: {
         ...get().playbackState,
@@ -173,7 +247,12 @@ export const useEEGStore = create<EEGState>((set, get) => ({
         currentFrame: frame,
       },
       eegData: frame.eeg,
-      bandPower: frame.bands,
+      bandPower: bands,
+      bandError: bands
+        ? null
+        : channelMatch
+          ? '当前回放帧缺少频段数据'
+          : `该录制仅包含 ${rec!.channel} 通道的频段数据`,
       brainState: frame.brainState,
       correlationData: frame.correlation,
     });

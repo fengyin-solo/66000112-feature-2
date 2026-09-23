@@ -335,9 +335,9 @@ export const RecordingPanel: React.FC = () => {
                 <span style={{ fontSize: '11px', color: '#388e3c' }}>放松: {playbackState.currentFrame.brainState.relaxation.toFixed(0)}</span>
                 <span style={{ fontSize: '11px', color: '#d32f2f' }}>疲劳: {playbackState.currentFrame.brainState.fatigue.toFixed(0)}</span>
                 <span style={{ fontSize: '11px', color: '#666' }}>|</span>
-                <span style={{ fontSize: '11px', color: '#1565c0' }}>α: {playbackState.currentFrame.bands.alpha.toFixed(2)}</span>
-                <span style={{ fontSize: '11px', color: '#e53935' }}>β: {playbackState.currentFrame.bands.beta.toFixed(2)}</span>
-                <span style={{ fontSize: '11px', color: '#2e7d32' }}>θ: {playbackState.currentFrame.bands.theta.toFixed(2)}</span>
+                <span style={{ fontSize: '11px', color: '#1565c0' }}>α: {(playbackState.currentFrame.bands?.alpha ?? 0).toFixed(2)}</span>
+                <span style={{ fontSize: '11px', color: '#e53935' }}>β: {(playbackState.currentFrame.bands?.beta ?? 0).toFixed(2)}</span>
+                <span style={{ fontSize: '11px', color: '#2e7d32' }}>θ: {(playbackState.currentFrame.bands?.theta ?? 0).toFixed(2)}</span>
               </div>
               <div style={{
                 display: 'flex',

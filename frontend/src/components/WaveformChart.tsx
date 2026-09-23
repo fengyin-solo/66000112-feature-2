@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { useEEGStore } from '../store/eeg';
 import { EEGData, BandPower, BrainState, CorrelationData } from '../types';
+import { isValidBandPower } from '../utils/bands';
 import axios from 'axios';
 
 const CHANNEL_NAMES: Record<string, string> = {
@@ -108,8 +109,7 @@ const computeCorrelation = (targetChannel: string, eegData: EEGData): Correlatio
 
 export const WaveformChart: React.FC = () => {
   const {
-    eegData, selectedChannel, setEEGData, setBandPower, setBrainState, setCorrelationData,
-    isRecording, addRecordingFrame, playbackMode,
+    eegData, selectedChannel, bandCompareChannel, playbackMode, isRecording,
   } = useEEGStore();
   const [loading, setLoading] = useState(false);
   const intervalRef = useRef<number | null>(null);
@@ -117,26 +117,67 @@ export const WaveformChart: React.FC = () => {
   const fetchEEG = async () => {
     const state = useEEGStore.getState();
     if (state.playbackMode) return;
+    const channel = state.selectedChannel;
+    // 对比通道与当前通道不能相同；相同视为未选择，避免出现两条完全一致的线
+    const compareChannel = state.bandCompareChannel && state.bandCompareChannel !== channel
+      ? state.bandCompareChannel
+      : null;
     setLoading(true);
-    let eeg: EEGData, bands: BandPower, brainState: BrainState, correlation: CorrelationData;
+    let eeg: EEGData | null = null;
+    let bands: BandPower | null = null;
+    let brainState: BrainState | null = null;
+    let correlation: CorrelationData | null = null;
+    let compareBands: BandPower | null = null;
+    let refreshFailed = false;
     try {
-      const { data } = await axios.get(`/api/eeg/sample/${state.selectedChannel}?duration=3`);
-      eeg = data.eeg;
-      bands = data.bands;
-      brainState = data.brainState;
-      correlation = data.correlation;
+      const params: Record<string, number | string> = { duration: 3 };
+      if (compareChannel) params.compare = compareChannel;
+      const { data } = await axios.get(`/api/eeg/sample/${channel}`, { params });
+      // 严格校验：主通道频段缺失/负载异常时不采纳后端结果，绝不沿用上一通道或上一帧
+      if (data?.eeg && data?.brainState && data?.correlation) {
+        eeg = data.eeg;
+        bands = isValidBandPower(data.bands) ? data.bands : null;
+        if (isValidBandPower(data.compareBands)) compareBands = data.compareBands;
+        brainState = data.brainState;
+        correlation = data.correlation;
+      } else {
+        refreshFailed = true;
+      }
     } catch {
+      // 离线降级：波形/脑状态沿用本地模拟，频段不伪造，置空并明确提示
       eeg = generateMockEEG(3);
-      bands = computeBandPower();
-      brainState = computeBrainState(bands);
-      correlation = computeCorrelation(state.selectedChannel, eeg);
+      brainState = computeBrainState(computeBandPower());
+      correlation = computeCorrelation(channel, eeg);
+      refreshFailed = true;
     }
-    state.setEEGData(eeg);
-    state.setBandPower(bands);
-    state.setBrainState(brainState);
-    state.setCorrelationData(correlation);
-    if (state.isRecording) {
-      state.addRecordingFrame(eeg, bands, brainState, correlation);
+    // 防止慢响应在用户已切走通道/对比通道后写入，造成跨通道串数据
+    const latest = useEEGStore.getState();
+    if (latest.playbackMode || latest.selectedChannel !== channel) return;
+    const latestCompare = latest.bandCompareChannel && latest.bandCompareChannel !== channel
+      ? latest.bandCompareChannel
+      : null;
+    if ((latestCompare ?? null) !== (compareChannel ?? null)) return;
+
+    latest.setEEGData(eeg);
+    latest.setBrainState(brainState);
+    latest.setCorrelationData(correlation);
+    if (!bands) {
+      latest.setBandPower(null);
+      latest.setBandError(refreshFailed ? '频段刷新失败，等待下一帧重试' : '频段数据缺失，等待下一帧刷新');
+    } else {
+      latest.setBandPower(bands);
+      latest.setBandError(null);
+    }
+    // 趋势点与波形同一刷新帧；bands 为 null 时仍压入断点（该时间窗无数据），不沿用旧值
+    latest.pushBandTrendPoint({
+      t: Date.now() / 1000,
+      channel,
+      bands,
+      compareChannel: compareChannel && compareBands ? compareChannel : null,
+      compareBands: compareChannel && compareBands ? compareBands : null,
+    });
+    if (latest.isRecording && bands && eeg && brainState && correlation) {
+      latest.addRecordingFrame(eeg, bands, brainState, correlation);
     }
     setLoading(false);
   };
@@ -154,7 +195,8 @@ export const WaveformChart: React.FC = () => {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [selectedChannel, playbackMode]);
+    // 对比通道切换后立即拉取同一帧的双通道频段；切换会经 store 清空旧结果
+  }, [selectedChannel, bandCompareChannel, playbackMode]);
 
   const chartData = eegData?.data[selectedChannel]?.map((v: number, i: number) => ({
     t: eegData.time[i]?.toFixed(3), value: v.toFixed(4)
